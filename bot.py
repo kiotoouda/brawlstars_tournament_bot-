@@ -39,7 +39,7 @@ from telegram.ext import (
 # CONFIG - set these
 # -----------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "REPLACE_WITH_YOUR_BOT_TOKEN")
-ADMINS = {123456789, 987654321}   # set your numeric Telegram user IDs
+ADMINS = {7665378359,  6548564636}   # set your numeric Telegram user IDs
 DATABASE = "tournaments.db"
 ROSTERS_DIR = Path("./rosters")
 # -----------------------
