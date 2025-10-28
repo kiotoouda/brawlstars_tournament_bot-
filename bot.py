@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - Complete Version with Admin Panel
+Brawl Stars Tournament Bot - Fixed Version
 """
 
 import os
@@ -170,9 +170,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += """
 **For Admins:**
 • Use "🛠️ Admin Panel" for admin controls
-• /create_tournament - Create new tournament
-• /delete_tournament - Delete tournament  
-• /admin_list - List all tournaments
+• /create - Create new tournament
 • Use tournament admin panel to manage brackets
 """
     
@@ -208,6 +206,47 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")]
     ]
     await update.message.reply_text("🛠️ Admin Panel", reply_markup=InlineKeyboardMarkup(kb))
+
+# SIMPLE CREATE TOURNAMENT COMMAND - NO CONVERSATION
+@admin_only
+async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple tournament creation without conversation"""
+    if not context.args:
+        await update.message.reply_text("Usage: /create <tournament_name> <max_teams>\nExample: /create Summer Cup 16")
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /create <tournament_name> <max_teams>\nExample: /create Summer Cup 16")
+        return
+    
+    try:
+        name = " ".join(context.args[:-1])
+        max_teams = int(context.args[-1])
+        
+        if max_teams < 2:
+            await update.message.reply_text("❌ Minimum 2 teams required.")
+            return
+            
+        if max_teams > 64:
+            await update.message.reply_text("❌ Maximum 64 teams allowed.")
+            return
+        
+        await db_execute(
+            "INSERT INTO tournaments (name, max_teams, status) VALUES (?, ?, 'registration')",
+            (name, max_teams)
+        )
+        
+        # Get the created tournament ID
+        tournament = await db_fetchone("SELECT id FROM tournaments ORDER BY id DESC LIMIT 1")
+        tid = tournament[0] if tournament else "unknown"
+        
+        await update.message.reply_text(f"✅ Tournament created! 🎉\nName: {name}\nMax Teams: {max_teams}\nID: {tid}")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Max teams must be a number.\nUsage: /create <name> <max_teams>")
+    except Exception as e:
+        logger.error(f"Error creating tournament: {e}")
+        await update.message.reply_text("❌ Error creating tournament. Please try again.")
 
 # Callback handler
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -281,8 +320,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Admin callbacks
     elif data == "admin_create":
-        await query.message.reply_text("🏆 Enter tournament name:")
-        return ADMIN_CREATE_NAME
+        await query.message.reply_text("🏆 To create a tournament, use:\n\n<code>/create Tournament Name 16</code>\n\nReplace 'Tournament Name' with your tournament name and '16' with the maximum number of teams.", parse_mode="HTML")
 
     elif data == "admin_list":
         rows = await db_fetchall("SELECT id, name, max_teams, status FROM tournaments ORDER BY id DESC")
@@ -420,7 +458,6 @@ async def generate_bracket(tid: int):
     random.shuffle(teams)
     
     # Simple bracket generation for now
-    # You can expand this with proper bracket logic
     for i in range(0, len(teams), 2):
         if i + 1 < len(teams):
             await db_execute(
@@ -514,55 +551,6 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# Admin commands
-@admin_only
-async def create_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏆 Enter tournament name:")
-    return ADMIN_CREATE_NAME
-
-async def admin_create_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text("❌ Name cannot be empty. Enter name:")
-        return ADMIN_CREATE_NAME
-    context.user_data['tournament_name'] = name
-    await update.message.reply_text("🔢 Enter max number of teams:")
-    return ADMIN_CREATE_MAXTEAMS
-
-async def admin_create_maxteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        max_teams = int(update.message.text.strip())
-        if max_teams < 2:
-            await update.message.reply_text("❌ Minimum 2 teams. Enter again:")
-            return ADMIN_CREATE_MAXTEAMS
-    except ValueError:
-        await update.message.reply_text("❌ Enter a valid number:")
-        return ADMIN_CREATE_MAXTEAMS
-    
-    name = context.user_data['tournament_name']
-    await db_execute(
-        "INSERT INTO tournaments (name, max_teams, status) VALUES (?, ?, 'registration')",
-        (name, max_teams)
-    )
-    
-    await update.message.reply_text(f"✅ Tournament '{name}' created!")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-@admin_only
-async def admin_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await admin_panel(update, context)
-
-@admin_only
-async def delete_tournament_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = await db_fetchall("SELECT id, name FROM tournaments ORDER BY id DESC")
-    if not rows:
-        await update.message.reply_text("❌ No tournaments to delete.")
-        return
-        
-    items = [(f"🗑️ {name}", f"admin_del_{tid}") for tid, name in rows]
-    await update.message.reply_text("Select tournament to delete:", reply_markup=make_keyboard(items))
-
 # Text message handler
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -578,7 +566,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text in ("🛠️ Admin Panel", "admin") and user.id in ADMINS:
         await admin_panel(update, context)
     else:
-        await update.message.reply_text("❓ Use /help for commands")
+        # Check if user is in registration flow
+        if context.user_data.get('reg_tid'):
+            # User is in registration, handle accordingly
+            await update.message.reply_text("Please complete your registration or send /done to cancel.")
+        else:
+            await update.message.reply_text("❓ Use /help for commands")
 
 # Main function
 def main():
@@ -590,7 +583,15 @@ def main():
     
     # Initialize
     ROSTERS_DIR.mkdir(parents=True, exist_ok=True)
-    asyncio.get_event_loop().run_until_complete(init_db())
+    
+    # Fix for asyncio warning
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    loop.run_until_complete(init_db())
     
     # Build application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -598,19 +599,8 @@ def main():
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("admin_list", admin_list_cmd))
-    app.add_handler(CommandHandler("delete_tournament", delete_tournament_cmd))
-    
-    # Create tournament conversation
-    create_conv = ConversationHandler(
-        entry_points=[CommandHandler("create_tournament", create_tournament)],
-        states={
-            ADMIN_CREATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_name)],
-            ADMIN_CREATE_MAXTEAMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_maxteams)],
-        },
-        fallbacks=[]
-    )
-    app.add_handler(create_conv)
+    app.add_handler(CommandHandler("create", create_tournament_simple))
+    app.add_handler(CommandHandler("admin_list", admin_panel))
     
     # Registration conversation
     reg_conv = ConversationHandler(
@@ -623,7 +613,8 @@ def main():
                 CommandHandler("done", reg_done),
             ],
         },
-        fallbacks=[CommandHandler("done", reg_done)]
+        fallbacks=[CommandHandler("done", reg_done)],
+        per_message=False
     )
     app.add_handler(reg_conv)
     
