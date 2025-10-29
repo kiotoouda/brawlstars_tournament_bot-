@@ -1193,7 +1193,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("create", create_tournament_simple))
     app.add_handler(CommandHandler("admin_list", admin_panel))
-    app.add_handler(CommandHandler("info", tournament_info))s
+    app.add_handler(CommandHandler("info", tournament_info))
     app.add_handler(CommandHandler("myteams", my_teams))
     app.add_handler(CommandHandler("stats", player_stats))
     app.add_handler(CommandHandler("search", search_tournament))
