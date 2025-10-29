@@ -240,7 +240,7 @@ Use the buttons below to get started! The arena awaits! ⚔️
     if user.id in ADMINS:
         kb.append([KeyboardButton("🛠️ Admin Panel")])
     
-    reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, persistent=True)
+   reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
     
     await update.message.reply_text(
         greeting, 
