@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - Persistent Version for Render
+Brawl Stars Tournament Bot - Persistent Version with GitHub Backup
 """
 
 import os
@@ -30,13 +30,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = {7665378359, 6548564636}
 DATABASE = "tournaments.db"
 ROSTERS_DIR = Path("./rosters")
-
-# Free cloud storage for backups
-BACKUP_URL = "https://api.jsonbin.io/v3/b"
-BACKUP_HEADERS = {
-    'Content-Type': 'application/json',
-    'X-Master-Key': '$2a$10$YOUR_FREE_KEY_HERE'  # Get free key from jsonbin.io
-}
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 # -----------------------
 
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +40,7 @@ logger = logging.getLogger(__name__)
 (REG_TEAM_NAME, REG_LEADER_USERNAME, REG_WAIT_ROSTER,
  ADMIN_CREATE_NAME, ADMIN_CREATE_MAXTEAMS) = range(5)
 
-# Database with backup/restore
+# Database with GitHub backup
 async def init_db():
     # First try to restore from backup
     await restore_from_backup()
@@ -70,8 +64,7 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS roster_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             team_id INTEGER NOT NULL,
-            telegram_file_id TEXT,
-            file_data TEXT  -- Store file as base64 for persistence
+            telegram_file_id TEXT
         );
         CREATE TABLE IF NOT EXISTS bracket_matches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,36 +77,97 @@ async def init_db():
         );
         """)
         await db.commit()
+    logger.info("✅ Database initialized")
+
+# Store the gist ID after first backup
+gist_id = None
 
 async def backup_database():
-    """Backup entire database to free cloud storage"""
+    """Backup database to GitHub Gist"""
+    if not GITHUB_TOKEN:
+        logger.warning("⚠️ No GitHub token for backup")
+        return
+    
     try:
         # Read database file
         with open(DATABASE, 'rb') as f:
             db_data = base64.b64encode(f.read()).decode()
         
-        # Backup to free service
+        backup_data = {
+            "database": db_data,
+            "timestamp": str(asyncio.get_event_loop().time())
+        }
+        
+        headers = {
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        
         async with aiohttp.ClientSession() as session:
-            data = {"database": db_data, "timestamp": str(asyncio.get_event_loop().time())}
-            async with session.put(BACKUP_URL, json=data, headers=BACKUP_HEADERS) as response:
-                if response.status == 200:
-                    logger.info("✅ Database backed up successfully")
-                else:
-                    logger.warning("⚠️ Backup failed but continuing")
+            global gist_id
+            if gist_id:
+                # Update existing gist
+                url = f'https://api.github.com/gists/{gist_id}'
+                data = {"files": {"bot_backup.json": {"content": json.dumps(backup_data)}}}
+                async with session.patch(url, headers=headers, json=data) as response:
+                    if response.status == 200:
+                        logger.info("✅ Database backed up to Gist")
+                    else:
+                        logger.warning(f"⚠️ Backup update failed: {response.status}")
+            else:
+                # Create new gist
+                url = 'https://api.github.com/gists'
+                data = {
+                    "public": False,
+                    "description": "Brawl Stars Bot Backup",
+                    "files": {"bot_backup.json": {"content": json.dumps(backup_data)}}
+                }
+                async with session.post(url, headers=headers, json=data) as response:
+                    if response.status == 201:
+                        result = await response.json()
+                        gist_id = result['id']
+                        logger.info(f"✅ New backup Gist created: {gist_id}")
+                    else:
+                        logger.error(f"❌ Gist creation failed: {response.status}")
+                        
     except Exception as e:
         logger.error(f"Backup error: {e}")
 
 async def restore_from_backup():
-    """Restore database from cloud backup"""
+    """Restore database from GitHub Gist"""
+    if not GITHUB_TOKEN:
+        logger.warning("⚠️ No GitHub token for restore")
+        return
+    
     try:
+        # First, try to find existing gists
+        headers = {'Authorization': f'token {GITHUB_TOKEN}'}
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(BACKUP_URL + "/latest", headers=BACKUP_HEADERS) as response:
+            url = 'https://api.github.com/gists'
+            async with session.get(url, headers=headers) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    db_data = base64.b64decode(data['record']['database'])
-                    with open(DATABASE, 'wb') as f:
-                        f.write(db_data)
-                    logger.info("✅ Database restored from backup")
+                    gists = await response.json()
+                    for gist in gists:
+                        if 'bot_backup.json' in gist['files']:
+                            global gist_id
+                            gist_id = gist['id']
+                            
+                            # Get the backup data
+                            gist_url = f'https://api.github.com/gists/{gist_id}'
+                            async with session.get(gist_url, headers=headers) as gist_response:
+                                if gist_response.status == 200:
+                                    result = await gist_response.json()
+                                    backup_data = json.loads(result['files']['bot_backup.json']['content'])
+                                    db_data = base64.b64decode(backup_data['database'])
+                                    
+                                    with open(DATABASE, 'wb') as f:
+                                        f.write(db_data)
+                                    logger.info("✅ Database restored from Gist")
+                                    return
+                    
+                    logger.info("ℹ️ No existing backup found, starting fresh")
+                    
     except Exception as e:
         logger.warning(f"Restore failed, starting fresh: {e}")
 
@@ -121,7 +175,7 @@ async def db_execute(query: str, params: tuple = ()):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute(query, params)
         await db.commit()
-    # Auto-backup after every write operation
+    # Auto-backup after important operations
     await backup_database()
 
 async def db_fetchone(query: str, params: tuple = ()):
@@ -134,21 +188,7 @@ async def db_fetchall(query: str, params: tuple = ()):
         cur = await db.execute(query, params)
         return await cur.fetchall()
 
-# Store photos in database instead of local files
-async def save_roster_photos(team_id: int, file_ids: List[str]):
-    """Save roster photos as file IDs in database (persistent)"""
-    for file_id in file_ids:
-        await db_execute(
-            "INSERT INTO roster_files (team_id, telegram_file_id) VALUES (?, ?)",
-            (team_id, file_id)
-        )
-
-async def get_roster_photos(team_id: int) -> List[str]:
-    """Get roster photo file IDs from database"""
-    rows = await db_fetchall("SELECT telegram_file_id FROM roster_files WHERE team_id = ?", (team_id,))
-    return [row[0] for row in rows] if rows else []
-
-# Keep your existing utility functions but remove file operations
+# Utility functions
 async def count_registered(tid: int) -> int:
     row = await db_fetchone("SELECT COUNT(*) FROM teams WHERE tournament_id = ?", (tid,))
     return row[0] if row else 0
@@ -157,17 +197,18 @@ def make_keyboard(items: List[Tuple[str, str]]):
     kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in items]
     return InlineKeyboardMarkup(kb)
 
-# Keep your existing handlers but MODIFY photo handling:
+# Auto-backup every hour
+async def auto_backup():
+    """Auto-backup database every hour"""
+    while True:
+        await asyncio.sleep(3600)  # 1 hour
+        await backup_database()
+        logger.info("🔄 Auto-backup completed")
 
-async def reg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Store photo file IDs (not actual files)"""
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        context.user_data.setdefault('reg_roster', []).append(file_id)
-        count = len(context.user_data['reg_roster'])
-        await update.message.reply_text(f"✅ Photo {count} received. Send more or /done.")
-    return REG_WAIT_ROSTER
+# [KEEP ALL YOUR EXISTING BOT CODE HERE]
+# Just replace the database functions and add the backup calls
 
+# Add backup to your registration flow
 async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = context.user_data.get('reg_tid')
     team_name = context.user_data.get('reg_teamname')
@@ -186,7 +227,7 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         team_id = cur.lastrowid
         
-        # Save roster file IDs to database
+        # Save roster file IDs
         for file_id in roster_files:
             await db.execute(
                 "INSERT INTO roster_files (team_id, telegram_file_id) VALUES (?, ?)",
@@ -194,7 +235,7 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await db.commit()
     
-    # Backup to cloud
+    # Backup to GitHub
     await backup_database()
     
     # Notify admins
@@ -212,50 +253,6 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# Modify the team view to use stored file IDs
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    # ... [keep your existing callback code] ...
-    
-    elif data.startswith("team_"):
-        parts = data.split("_")
-        tid = int(parts[1])
-        team_id = int(parts[2])
-        
-        team = await db_fetchone("SELECT name, leader_username FROM teams WHERE id = ?", (team_id,))
-        if not team:
-            await query.edit_message_text("❌ Team not found.")
-            return
-            
-        name, leader = team
-        text = f"👥 Team: {name}\n👑 Leader: @{leader if leader else 'N/A'}"
-        
-        # Get roster photos from database (file IDs)
-        file_ids = await get_roster_photos(team_id)
-        if file_ids:
-            await query.message.reply_text(text)
-            media = [InputMediaPhoto(file_id) for file_id in file_ids]
-            try:
-                await query.message.reply_media_group(media)
-            except Exception as e:
-                logger.error(f"Error sending photos: {e}")
-                await query.message.reply_text("📷 Roster photos available")
-        else:
-            await query.edit_message_text(text + "\n📷 No roster photos")
-
-# Add auto-backup every hour
-async def auto_backup():
-    """Auto-backup database every hour"""
-    while True:
-        await asyncio.sleep(3600)  # 1 hour
-        await backup_database()
-
-# Keep your existing start, help, admin functions...
-# [KEEP ALL YOUR EXISTING HANDLER CODE]
-
 # Modified main function
 def main():
     if not BOT_TOKEN:
@@ -264,7 +261,7 @@ def main():
     
     logger.info("🚀 Starting Brawl Stars Tournament Bot...")
     
-    # Initialize database with backup/restore
+    # Initialize
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -279,7 +276,7 @@ def main():
     # Build application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Add all your handlers (keep existing)
+    # Add all your existing handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("create", create_tournament_simple))
@@ -305,7 +302,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    logger.info("🤖 Bot is running with persistent storage...")
+    logger.info("🤖 Bot is running with GitHub backup...")
     app.run_polling()
 
 if __name__ == "__main__":
