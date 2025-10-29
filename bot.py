@@ -204,57 +204,73 @@ async def get_team_name(team_id: int) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    # 🎉 ENHANCED GREETING MESSAGE
     greeting = f"""
-🎮 Welcome to Brawl Stars Tournament Bot, {user.first_name}! 🎮
+✨ <b>WELCOME TO BRAWL STARS TOURNAMENT BOT!</b> ✨
 
-I can help you organize and manage Brawl Stars tournaments!
+🎮 <i>Hello {user.first_name}! Ready to dominate the tournament?</i> 🎮
 
-✨ Features:
-• Create and manage tournaments
-• Team registration with roster photos  
-• Automatic bracket generation
-• Live tournament progress
-• Player statistics and team management
+I'm your ultimate tournament assistant! Here's what I can do for you:
 
-Use the buttons below or commands to get started! 🚀
+<b>🏆 TOURNAMENT FEATURES:</b>
+• 📋 Browse active tournaments
+• ✅ Register your team with roster photos  
+• 👀 View other teams and their rosters
+• ⚔️ Follow live bracket progress
+• 📊 Track your player statistics
 
-**Commands:**
+<b>🎯 QUICK COMMANDS:</b>
 /info <id> - Tournament details
 /myteams - Your registered teams  
 /stats - Your player statistics
-/search <name> - Search tournaments
+/search <name> - Find tournaments
+
+<b>🚀 READY TO PLAY?</b>
+Use the buttons below to get started! The arena awaits! ⚔️
     """
     
+    # 🎯 FIXED KEYBOARD - ALWAYS SHOWS
     kb = [
         [KeyboardButton("📋 Tournaments"), KeyboardButton("🔎 View Teams")],
-        [KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("ℹ️ Help"), KeyboardButton("📊 My Stats")]
     ]
+    
+    # Add admin button only for admins
     if user.id in ADMINS:
         kb.append([KeyboardButton("🛠️ Admin Panel")])
     
-    await update.message.reply_text(greeting, reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode="HTML")
+    reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, persistent=True)
+    
+    await update.message.reply_text(
+        greeting, 
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
-🤖 **Brawl Stars Tournament Bot - Complete Guide**
+🤖 <b>BRAWL STARS TOURNAMENT BOT - COMPLETE GUIDE</b> 🤖
 
-**For Players:**
-• Use "📋 Tournaments" to browse and register
-• Use "🔎 View Teams" to see registered teams
-• /myteams - View your registered teams
-• /stats - View your player statistics
-• /info <id> - Get tournament details
-• /search <name> - Search tournaments
+<b>🎮 FOR PLAYERS:</b>
+• Use <b>"📋 Tournaments"</b> to browse and register
+• Use <b>"🔎 View Teams"</b> to see registered teams
+• <b>/myteams</b> - View your registered teams
+• <b>/stats</b> - View your player statistics  
+• <b>/info <id></b> - Get tournament details
+• <b>/search <name></b> - Search tournaments
 
-**For Admins:**
-• Use "🛠️ Admin Panel" for admin controls
-• /create <name> <teams> - Create tournament
+<b>🛠️ FOR ADMINS:</b>
+• Use <b>"🛠️ Admin Panel"</b> for admin controls
+• <b>/create <name> <teams></b> - Create tournament
 • Manage brackets and record match results
 
-**Need Help?**
+<b>📞 NEED HELP?</b>
 Contact the tournament organizers!
+
+<b>🎯 PRO TIP:</b> Keep this keyboard visible for quick access!
     """
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def show_tournaments_keyboard():
     rows = await db_fetchall("SELECT id, name, max_teams, status FROM tournaments ORDER BY id DESC")
@@ -371,16 +387,16 @@ async def my_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (username,))
     
     if not teams:
-        await update.message.reply_text("🤷 You haven't registered any teams yet.")
+        await update.message.reply_text("🤷 You haven't registered any teams yet.\n\nUse '📋 Tournaments' to join one! 🎯")
         return
     
-    text = "👥 Your Registered Teams:\n\n"
+    text = "👥 <b>Your Registered Teams:</b>\n\n"
     for team_name, tour_name, tid, status in teams:
         status_emoji = "⚔️" if status == 'in_progress' else "✅" if status == 'finished' else "📝"
-        text += f"• {team_name} in {tour_name} (ID: {tid}) {status_emoji}\n"
+        text += f"• <b>{team_name}</b> in {tour_name} (ID: {tid}) {status_emoji}\n"
     
-    text += "\nUse /info <tournament_id> to see tournament details!"
-    await update.message.reply_text(text)
+    text += "\nUse <code>/info [tournament_id]</code> to see tournament details!"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def player_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show player statistics"""
@@ -406,15 +422,15 @@ async def player_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WHERE t.leader_username = ?
     """, (username,))
     
-    text = f"""📊 Player Statistics for @{username}
+    text = f"""📊 <b>Player Statistics for @{username}</b>
 
-👥 Teams Led: {teams_led[0]}
-🏆 Tournaments Joined: {tournaments_count[0]}
-🎯 Matches Won: {wins[0]}
+👥 <b>Teams Led:</b> {teams_led[0]}
+🏆 <b>Tournaments Joined:</b> {tournaments_count[0]}
+🎯 <b>Matches Won:</b> {wins[0]}
 
-Keep participating in tournaments! 🚀"""
+<b>Keep dominating the arena! 🚀</b>"""
     
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def search_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search tournaments by name"""
@@ -447,7 +463,7 @@ async def show_bracket_public(tid: int):
     if not matches:
         return "❌ Bracket not generated yet."
     
-    text = "⚔️ Tournament Bracket:\n\n"
+    text = "⚔️ <b>Tournament Bracket:</b>\n\n"
     rounds = {}
     for match in matches:
         round_idx, match_idx, teamA_id, teamB_id, winner_id = match
@@ -456,7 +472,7 @@ async def show_bracket_public(tid: int):
         rounds[round_idx].append(match)
     
     for round_idx in sorted(rounds.keys()):
-        text += f"--- Round {round_idx + 1} ---\n"
+        text += f"--- <b>Round {round_idx + 1}</b> ---\n"
         for match in rounds[round_idx]:
             _, match_idx, teamA_id, teamB_id, winner_id = match
             
@@ -520,24 +536,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         name, leader = team
-        text = f"👥 Team: {name}\n👑 Leader: @{leader if leader else 'Not provided'}"
+        text = f"👥 <b>Team:</b> {name}\n👑 <b>Leader:</b> @{leader if leader else 'Not provided'}"
         
         # Get roster photos
         file_ids = await db_fetchall("SELECT telegram_file_id FROM roster_files WHERE team_id = ?", (team_id,))
         if file_ids:
-            await query.message.reply_text(text)
+            await query.message.reply_text(text, parse_mode="HTML")
             media = [InputMediaPhoto(row[0]) for row in file_ids]
             try:
                 await query.message.reply_media_group(media)
             except Exception:
                 await query.message.reply_text("📷 Roster photos available")
         else:
-            await query.edit_message_text(text + "\n📷 No roster photos available")
+            await query.edit_message_text(text + "\n📷 No roster photos available", parse_mode="HTML")
 
     elif data.startswith("bracket_"):
         tid = int(data.split("_")[-1])
         bracket_text = await show_bracket_public(tid)
-        await query.edit_message_text(bracket_text)
+        await query.edit_message_text(bracket_text, parse_mode="HTML")
 
     # Admin callbacks
     elif data.startswith("admin_"):
@@ -1035,7 +1051,7 @@ async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
 # =======================
-# TEXT MESSAGE HANDLER
+# TEXT MESSAGE HANDLER - FIXED
 # =======================
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1049,10 +1065,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Select tournament to view teams:", reply_markup=kb)
     elif text in ("ℹ️ Help", "help"):
         await help_cmd(update, context)
+    elif text in ("📊 My Stats", "stats", "mystats"):
+        await player_stats(update, context)
     elif text in ("🛠️ Admin Panel", "admin") and user.id in ADMINS:
         await admin_panel(update, context)
     else:
-        await update.message.reply_text("❓ Use /help for available commands")
+        # If no command matches, show main keyboard again
+        kb = [
+            [KeyboardButton("📋 Tournaments"), KeyboardButton("🔎 View Teams")],
+            [KeyboardButton("ℹ️ Help"), KeyboardButton("📊 My Stats")]
+        ]
+        if user.id in ADMINS:
+            kb.append([KeyboardButton("🛠️ Admin Panel")])
+        
+        reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, persistent=True)
+        await update.message.reply_text(
+            "🎮 Use the buttons below or type /help for commands!",
+            reply_markup=reply_markup
+        )
 
 # =======================
 # MAIN FUNCTION
@@ -1120,7 +1150,7 @@ def main():
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    logger.info("🤖 Bot is running with ALL features...")
+    logger.info("🤖 Bot is running with ALL features and FIXED keyboard...")
     app.run_polling()
 
 if __name__ == "__main__":
