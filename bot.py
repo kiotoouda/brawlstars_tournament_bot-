@@ -240,7 +240,7 @@ Use the buttons below to get started! The arena awaits! ⚔️
     if user.id in ADMINS:
         kb.append([KeyboardButton("🛠️ Admin Panel")])
     
-   reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
+    reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
     
     await update.message.reply_text(
         greeting, 
@@ -1078,7 +1078,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user.id in ADMINS:
             kb.append([KeyboardButton("🛠️ Admin Panel")])
         
-        reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, persistent=True)
+        reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True, is_persistent=True)
         await update.message.reply_text(
             "🎮 Use the buttons below or type /help for commands!",
             reply_markup=reply_markup
