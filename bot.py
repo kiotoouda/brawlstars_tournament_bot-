@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - Complete Version with All Features
+Brawl Stars Tournament Bot - PERFECTED VERSION
 """
 
 import os
@@ -27,7 +27,7 @@ from telegram.ext import (
 # CONFIG
 # -----------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMINS = {7665378359, 6548564636}  # Add your admin IDs here
+ADMINS = {7665378359, 6548564636}
 DATABASE = "tournaments.db"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 # -----------------------
@@ -192,6 +192,12 @@ async def is_tournament_full(tid: int) -> bool:
     max_teams = await get_tournament_max_teams(tid)
     return count >= max_teams
 
+async def get_team_name(team_id: int) -> str:
+    if not team_id:
+        return "TBD"
+    team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
+    return team[0] if team else "Unknown"
+
 # =======================
 # BOT HANDLERS - USER
 # =======================
@@ -208,8 +214,15 @@ I can help you organize and manage Brawl Stars tournaments!
 • Team registration with roster photos  
 • Automatic bracket generation
 • Live tournament progress
+• Player statistics and team management
 
-Use the buttons below to get started! 🚀
+Use the buttons below or commands to get started! 🚀
+
+**Commands:**
+/info <id> - Tournament details
+/myteams - Your registered teams  
+/stats - Your player statistics
+/search <name> - Search tournaments
     """
     
     kb = [
@@ -223,17 +236,23 @@ Use the buttons below to get started! 🚀
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
-🤖 **Brawl Stars Tournament Bot Help**
+🤖 **Brawl Stars Tournament Bot - Complete Guide**
 
 **For Players:**
 • Use "📋 Tournaments" to browse and register
 • Use "🔎 View Teams" to see registered teams
-• Follow registration process to join tournaments
+• /myteams - View your registered teams
+• /stats - View your player statistics
+• /info <id> - Get tournament details
+• /search <name> - Search tournaments
 
 **For Admins:**
 • Use "🛠️ Admin Panel" for admin controls
 • /create <name> <teams> - Create tournament
 • Manage brackets and record match results
+
+**Need Help?**
+Contact the tournament organizers!
     """
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -242,9 +261,14 @@ async def show_tournaments_keyboard():
     items = []
     for tid, name, max_teams, status in rows:
         count = await count_registered(tid)
-        label = f"{name} ({count}/{max_teams})"
-        if status == 'registration' and count < max_teams:
-            label += " ✅"
+        status_emojis = {
+            'registration': '📝',
+            'full': '🔒', 
+            'in_progress': '⚔️',
+            'finished': '🏁'
+        }
+        status_emoji = status_emojis.get(status, '❓')
+        label = f"{name} ({count}/{max_teams}) {status_emoji}"
         items.append((label, f"view_t_{tid}"))
     return make_keyboard(items) if items else make_keyboard([("No tournaments available", "none")])
 
@@ -260,18 +284,192 @@ async def show_tournament_detail(tid: int, user_id: int):
     name, max_teams, status = row
     count = await count_registered(tid)
     
+    status_emojis = {
+        'registration': '📝',
+        'full': '🔒', 
+        'in_progress': '⚔️',
+        'finished': '🏁'
+    }
+    status_emoji = status_emojis.get(status, '❓')
+    
     text = f"""🏆 <b>{name}</b>
-📊 Teams: {count}/{max_teams}
-🎯 Status: {status}"""
+📊 ID: {tid}
+👥 Teams: {count}/{max_teams}
+{status_emoji} Status: {status}"""
 
     kb = []
     if status == 'registration' and count < max_teams:
         kb.append([InlineKeyboardButton("✅ Register Team", callback_data=f"reg_{tid}")])
     kb.append([InlineKeyboardButton("👀 View Teams", callback_data=f"teams_{tid}")])
+    
+    if status in ['in_progress', 'finished']:
+        kb.append([InlineKeyboardButton("⚔️ View Bracket", callback_data=f"bracket_{tid}")])
+    
     if user_id in ADMINS:
         kb.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data=f"admin_{tid}")])
     
     return text, InlineKeyboardMarkup(kb)
+
+# =======================
+# NEW PLAYER FEATURES
+# =======================
+
+async def tournament_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed tournament information"""
+    if not context.args:
+        await update.message.reply_text("Usage: /info <tournament_id>\nExample: /info 1")
+        return
+    
+    try:
+        tid = int(context.args[0])
+        row = await db_fetchone("SELECT name, max_teams, status FROM tournaments WHERE id = ?", (tid,))
+        if not row:
+            await update.message.reply_text("❌ Tournament not found.")
+            return
+        
+        name, max_teams, status = row
+        count = await count_registered(tid)
+        
+        # Get all teams
+        teams = await db_fetchall("SELECT name, leader_username FROM teams WHERE tournament_id = ? ORDER BY name", (tid,))
+        
+        text = f"""🏆 <b>{name}</b>
+📊 ID: {tid}
+👥 Teams: {count}/{max_teams}
+🎯 Status: {status}
+
+📋 Registered Teams:
+"""
+        for i, (team_name, leader) in enumerate(teams, 1):
+            text += f"{i}. {team_name} - @{leader or 'No username'}\n"
+        
+        # Add bracket if available
+        if status in ['in_progress', 'finished']:
+            bracket_text = await show_bracket_public(tid)
+            text += f"\n{bracket_text}"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Tournament ID must be a number.")
+
+async def my_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show teams where user is leader"""
+    user = update.effective_user
+    username = user.username
+    
+    if not username:
+        await update.message.reply_text("❌ You need a Telegram username to use this feature.")
+        return
+    
+    teams = await db_fetchall("""
+        SELECT t.name, tour.name, tour.id, tour.status
+        FROM teams t 
+        JOIN tournaments tour ON t.tournament_id = tour.id 
+        WHERE t.leader_username = ? 
+        ORDER BY tour.id
+    """, (username,))
+    
+    if not teams:
+        await update.message.reply_text("🤷 You haven't registered any teams yet.")
+        return
+    
+    text = "👥 Your Registered Teams:\n\n"
+    for team_name, tour_name, tid, status in teams:
+        status_emoji = "⚔️" if status == 'in_progress' else "✅" if status == 'finished' else "📝"
+        text += f"• {team_name} in {tour_name} (ID: {tid}) {status_emoji}\n"
+    
+    text += "\nUse /info <tournament_id> to see tournament details!"
+    await update.message.reply_text(text)
+
+async def player_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show player statistics"""
+    user = update.effective_user
+    username = user.username
+    
+    if not username:
+        await update.message.reply_text("❌ You need a Telegram username to view stats.")
+        return
+    
+    # Count teams led
+    teams_led = await db_fetchone("SELECT COUNT(*) FROM teams WHERE leader_username = ?", (username,))
+    
+    # Count tournaments participated
+    tournaments_count = await db_fetchone("""
+        SELECT COUNT(DISTINCT tournament_id) FROM teams WHERE leader_username = ?
+    """, (username,))
+    
+    # Count wins
+    wins = await db_fetchone("""
+        SELECT COUNT(*) FROM bracket_matches b 
+        JOIN teams t ON b.winner_team_id = t.id 
+        WHERE t.leader_username = ?
+    """, (username,))
+    
+    text = f"""📊 Player Statistics for @{username}
+
+👥 Teams Led: {teams_led[0]}
+🏆 Tournaments Joined: {tournaments_count[0]}
+🎯 Matches Won: {wins[0]}
+
+Keep participating in tournaments! 🚀"""
+    
+    await update.message.reply_text(text)
+
+async def search_tournament(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search tournaments by name"""
+    if not context.args:
+        await update.message.reply_text("Usage: /search <tournament_name>")
+        return
+    
+    search_term = " ".join(context.args).lower()
+    rows = await db_fetchall("SELECT id, name, max_teams, status FROM tournaments WHERE LOWER(name) LIKE ? ORDER BY id DESC", (f'%{search_term}%',))
+    
+    if not rows:
+        await update.message.reply_text("❌ No tournaments found matching your search.")
+        return
+    
+    items = []
+    for tid, name, max_teams, status in rows:
+        count = await count_registered(tid)
+        status_emoji = "⚔️" if status == 'in_progress' else "✅" if status == 'finished' else "📝"
+        items.append((f"{name} ({count}/{max_teams}) {status_emoji}", f"view_t_{tid}"))
+    
+    await update.message.reply_text("🔍 Search Results:", reply_markup=make_keyboard(items))
+
+async def show_bracket_public(tid: int):
+    """Show bracket for players (view only)"""
+    matches = await db_fetchall("""
+        SELECT round_index, match_index, teamA_id, teamB_id, winner_team_id 
+        FROM bracket_matches WHERE tournament_id = ? ORDER BY round_index, match_index
+    """, (tid,))
+    
+    if not matches:
+        return "❌ Bracket not generated yet."
+    
+    text = "⚔️ Tournament Bracket:\n\n"
+    rounds = {}
+    for match in matches:
+        round_idx, match_idx, teamA_id, teamB_id, winner_id = match
+        if round_idx not in rounds:
+            rounds[round_idx] = []
+        rounds[round_idx].append(match)
+    
+    for round_idx in sorted(rounds.keys()):
+        text += f"--- Round {round_idx + 1} ---\n"
+        for match in rounds[round_idx]:
+            _, match_idx, teamA_id, teamB_id, winner_id = match
+            
+            teamA_name = await get_team_name(teamA_id)
+            teamB_name = await get_team_name(teamB_id)
+            
+            if winner_id:
+                winner_name = await get_team_name(winner_id)
+                text += f"Match {match_idx+1}: {teamA_name} vs {teamB_name} → 🏆 {winner_name}\n"
+            else:
+                text += f"Match {match_idx+1}: {teamA_name} vs {teamB_name}\n"
+    
+    return text
 
 # =======================
 # REGISTRATION FLOW
@@ -336,9 +534,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text(text + "\n📷 No roster photos available")
 
+    elif data.startswith("bracket_"):
+        tid = int(data.split("_")[-1])
+        bracket_text = await show_bracket_public(tid)
+        await query.edit_message_text(bracket_text)
+
     # Admin callbacks
     elif data.startswith("admin_"):
         await admin_callback_handler(update, context)
+    
+    # Winner selection callbacks
+    elif data.startswith("win_"):
+        await winner_callback_handler(update, context)
 
 async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team_name = update.message.text.strip()
@@ -379,7 +586,7 @@ async def reg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = update.message.photo[-1].file_id
         context.user_data.setdefault('reg_roster', []).append(file_id)
         count = len(context.user_data['reg_roster'])
-        await update.message.reply_text(f"✅ Photo {count} received. Send more or /done when finished.")
+        await update.message.reply_text(f"✅ Photo {count} received. Send more or /done when finished.\n\n⏰ Session will timeout in 5 minutes.")
     return REG_WAIT_ROSTER
 
 async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -443,7 +650,7 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     
-    await update.message.reply_text(f"✅ Team '{team_name}' registered successfully! 🎉\n\nTotal teams: {count}/{max_teams}")
+    await update.message.reply_text(f"✅ Team '{team_name}' registered successfully! 🎉\n\nTotal teams: {count}/{max_teams}\n\nUse /myteams to see all your teams!")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -510,7 +717,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         items = []
         for tid, name, max_teams, status in rows:
             count = await count_registered(tid)
-            items.append((f"{name} ({count}/{max_teams}) - {status}", f"admin_t_{tid}"))
+            status_emoji = "⚔️" if status == 'in_progress' else "✅" if status == 'finished' else "📝"
+            items.append((f"{name} ({count}/{max_teams}) {status_emoji}", f"admin_t_{tid}"))
         
         await query.edit_message_text("🏆 Tournaments:", reply_markup=make_keyboard(items))
 
@@ -592,34 +800,12 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         # Generate bracket
         await generate_bracket(tid)
         await db_execute("UPDATE tournaments SET status = 'in_progress' WHERE id = ?", (tid,))
-        await query.edit_message_text("✅ Bracket generated! Tournament status: in_progress\n\nUse 'Manage Bracket' to record match results.")
+        
+        # Show the bracket immediately after generation
+        await show_bracket_admin_view(update, context, tid)
 
     elif data.startswith("admin_manage_bracket_"):
         tid = int(data.split("_")[-1])
-        await show_bracket_admin_view(update, context, tid)
-
-    elif data.startswith("win_"):
-        parts = data.split("_")
-        match_id = int(parts[1])
-        team_side = parts[2]  # A or B
-        
-        match = await db_fetchone("SELECT tournament_id, teamA_id, teamB_id FROM bracket_matches WHERE id = ?", (match_id,))
-        if not match:
-            await query.edit_message_text("❌ Match not found.")
-            return
-            
-        tid, teamA_id, teamB_id = match
-        
-        if team_side == "A" and teamA_id:
-            winner_id = teamA_id
-        elif team_side == "B" and teamB_id:
-            winner_id = teamB_id
-        else:
-            await query.edit_message_text("❌ Invalid selection.")
-            return
-            
-        await db_execute("UPDATE bracket_matches SET winner_team_id = ? WHERE id = ?", (winner_id, match_id))
-        await propagate_winner(tid)
         await show_bracket_admin_view(update, context, tid)
 
     elif data.startswith("admin_del_"):
@@ -661,6 +847,52 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text)
 
 # =======================
+# WINNER SELECTION HANDLER
+# =======================
+
+async def winner_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("win_"):
+        parts = data.split("_")
+        match_id = int(parts[1])
+        team_side = parts[2]  # A or B
+        
+        # Get match details
+        match = await db_fetchone("SELECT tournament_id, teamA_id, teamB_id FROM bracket_matches WHERE id = ?", (match_id,))
+        if not match:
+            await query.edit_message_text("❌ Match not found.")
+            return
+            
+        tid, teamA_id, teamB_id = match
+        
+        # Determine winner team ID
+        if team_side == "A" and teamA_id:
+            winner_id = teamA_id
+        elif team_side == "B" and teamB_id:
+            winner_id = teamB_id
+        else:
+            await query.edit_message_text("❌ Invalid selection.")
+            return
+        
+        # Get winner team name for confirmation
+        winner_team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (winner_id,))
+        if not winner_team:
+            await query.edit_message_text("❌ Team not found.")
+            return
+            
+        # Update match winner
+        await db_execute("UPDATE bracket_matches SET winner_team_id = ? WHERE id = ?", (winner_id, match_id))
+        
+        # Propagate winner to next round
+        await propagate_winner(tid)
+        
+        # Show updated bracket
+        await show_bracket_admin_view(update, context, tid)
+
+# =======================
 # BRACKET SYSTEM
 # =======================
 
@@ -675,17 +907,20 @@ async def generate_bracket(tid: int):
     
     # Generate matches for first round
     round_index = 0
+    match_index = 0
+    
     for i in range(0, len(teams), 2):
         teamA = teams[i]
         teamB = teams[i+1] if i+1 < len(teams) else None
         
         await db_execute(
             "INSERT INTO bracket_matches (tournament_id, round_index, match_index, teamA_id, teamB_id) VALUES (?, ?, ?, ?, ?)",
-            (tid, round_index, i//2, teamA["id"], teamB["id"] if teamB else None)
+            (tid, round_index, match_index, teamA["id"], teamB["id"] if teamB else None)
         )
+        match_index += 1
 
 async def propagate_winner(tid: int):
-    """Propagate winners to next rounds and check if tournament is finished"""
+    """Propagate winners to next rounds"""
     matches = await db_fetchall("""
         SELECT id, round_index, match_index, teamA_id, teamB_id, winner_team_id 
         FROM bracket_matches 
@@ -716,13 +951,16 @@ async def propagate_winner(tid: int):
         for match_idx, match in rounds[round_idx].items():
             if match["winner"]:
                 next_match_idx = match_idx // 2
-                next_match = rounds[round_idx + 1][next_match_idx]
-                
-                # Determine if winner goes to teamA or teamB slot
-                if next_match["teamA"] is None:
-                    await db_execute("UPDATE bracket_matches SET teamA_id = ? WHERE id = ?", (match["winner"], next_match["id"]))
-                elif next_match["teamB"] is None:
-                    await db_execute("UPDATE bracket_matches SET teamB_id = ? WHERE id = ?", (match["winner"], next_match["id"]))
+                if next_match_idx in rounds[round_idx + 1]:
+                    next_match = rounds[round_idx + 1][next_match_idx]
+                    
+                    # Determine if winner goes to teamA or teamB slot
+                    position_in_next_match = match_idx % 2  # 0 for teamA, 1 for teamB
+                    
+                    if position_in_next_match == 0:  # Goes to teamA
+                        await db_execute("UPDATE bracket_matches SET teamA_id = ? WHERE id = ?", (match["winner"], next_match["id"]))
+                    else:  # Goes to teamB
+                        await db_execute("UPDATE bracket_matches SET teamB_id = ? WHERE id = ?", (match["winner"], next_match["id"]))
     
     # Check if tournament is finished (final has winner)
     final_matches = [m for m in matches if m[1] == max_round]
@@ -730,7 +968,7 @@ async def propagate_winner(tid: int):
         await declare_winner(tid, final_matches[0][5])
 
 async def declare_winner(tid: int, winner_team_id: int):
-    """Declare tournament winner and show final standings"""
+    """Declare tournament winner"""
     winner_team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (winner_team_id,))
     if winner_team:
         await db_execute("UPDATE tournaments SET status = 'finished' WHERE id = ?", (tid,))
@@ -754,7 +992,7 @@ async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_
     """, (tid,))
     
     if not matches:
-        await update.callback_query.edit_message_text("❌ No bracket found.")
+        await update.callback_query.edit_message_text("❌ No bracket matches found.")
         return
     
     text = "⚔️ Tournament Bracket:\n\n"
@@ -774,20 +1012,13 @@ async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_
             mid, _, match_idx, teamA_id, teamB_id, winner_id = match
             
             # Get team names
-            teamA_name = "TBD"
-            if teamA_id:
-                teamA = await db_fetchone("SELECT name FROM teams WHERE id = ?", (teamA_id,))
-                teamA_name = teamA[0] if teamA else "Unknown"
-            
-            teamB_name = "TBD" 
-            if teamB_id:
-                teamB = await db_fetchone("SELECT name FROM teams WHERE id = ?", (teamB_id,))
-                teamB_name = teamB[0] if teamB else "Unknown"
+            teamA_name = await get_team_name(teamA_id)
+            teamB_name = await get_team_name(teamB_id)
             
             winner_text = ""
             if winner_id:
-                winner = await db_fetchone("SELECT name FROM teams WHERE id = ?", (winner_id,))
-                winner_text = f" 🏆 Winner: {winner[0]}" if winner else ""
+                winner_name = await get_team_name(winner_id)
+                winner_text = f" 🏆 Winner: {winner_name}"
             
             text += f"Match {match_idx + 1}: {teamA_name} vs {teamB_name}{winner_text}\n"
             
@@ -797,6 +1028,9 @@ async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_
                     InlineKeyboardButton(f"✅ {teamA_name}", callback_data=f"win_{mid}_A"),
                     InlineKeyboardButton(f"✅ {teamB_name}", callback_data=f"win_{mid}_B")
                 ])
+    
+    if not kb:
+        text += "\n🎉 All matches completed! Tournament finished."
     
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
@@ -858,6 +1092,10 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("create", create_tournament_simple))
     app.add_handler(CommandHandler("admin_list", admin_panel))
+    app.add_handler(CommandHandler("info", tournament_info))
+    app.add_handler(CommandHandler("myteams", my_teams))
+    app.add_handler(CommandHandler("stats", player_stats))
+    app.add_handler(CommandHandler("search", search_tournament))
     
     # Registration conversation
     reg_conv = ConversationHandler(
@@ -875,13 +1113,14 @@ def main():
     )
     app.add_handler(reg_conv)
     
-    # Callback queries
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    # Callback queries - IMPORTANT: Add winner handler separately
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(view_t_|reg_|teams_|team_|admin_|bracket_)"))
+    app.add_handler(CallbackQueryHandler(winner_callback_handler, pattern=r"^win_"))
     
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    logger.info("🤖 Bot is running with all features...")
+    logger.info("🤖 Bot is running with ALL features...")
     app.run_polling()
 
 if __name__ == "__main__":
