@@ -40,6 +40,27 @@ logger = logging.getLogger(__name__)
  ADMIN_CREATE_NAME, ADMIN_CREATE_MAXTEAMS) = range(5)
 
 # =======================
+# DECORATORS & UTILITIES
+# =======================
+
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user = update.effective_user
+        if user and user.id not in ADMINS:
+            if update.callback_query:
+                await update.callback_query.answer("Admin only", show_alert=True)
+            else:
+                await update.effective_message.reply_text("⛔ Admin-only command.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+def make_keyboard(items: List[Tuple[str, str]]):
+    kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in items]
+    return InlineKeyboardMarkup(kb)
+
+# =======================
 # BACKUP SYSTEM
 # =======================
 
@@ -169,10 +190,6 @@ async def db_fetchall(query: str, params: tuple = ()):
 async def count_registered(tid: int) -> int:
     row = await db_fetchone("SELECT COUNT(*) FROM teams WHERE tournament_id = ?", (tid,))
     return row[0] if row else 0
-
-def make_keyboard(items: List[Tuple[str, str]]):
-    kb = [[InlineKeyboardButton(label, callback_data=cb)] for label, cb in items]
-    return InlineKeyboardMarkup(kb)
 
 # =======================
 # BOT HANDLERS
@@ -362,7 +379,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("remove_"):
         parts = data.split("_"); tid = int(parts[1]); team_id = int(parts[2])
         team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
-        if team: await db_execute("DELETE FROM teams WHERE id = ?", (team_id,))
+        if team: 
+            await db_execute("DELETE FROM teams WHERE id = ?", (team_id,))
+            await query.edit_message_text(f"✅ Removed team: {team[0]}")
 
     elif data.startswith("admin_del_"):
         tid = int(data.split("_")[-1])
@@ -374,19 +393,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("confirm_del_"):
         tid = int(data.split("_")[-1])
         tournament = await db_fetchone("SELECT name FROM tournaments WHERE id = ?", (tid,))
-        if tournament: await db_execute("DELETE FROM tournaments WHERE id = ?", (tid,))
+        if tournament: 
+            await db_execute("DELETE FROM tournaments WHERE id = ?", (tid,))
+            await query.edit_message_text(f"✅ Deleted tournament: {tournament[0]}")
 
     elif data.startswith("admin_bracket_"):
         tid = int(data.split("_")[-1])
         count = await count_registered(tid)
-        if count < 2: return
+        if count < 2: 
+            await query.edit_message_text("❌ Need at least 2 teams for bracket.")
+            return
         await generate_bracket(tid)
         await db_execute("UPDATE tournaments SET status = 'in_progress' WHERE id = ?", (tid,))
         await query.edit_message_text("✅ Bracket generated!")
 
     elif data == "admin_delete":
         rows = await db_fetchall("SELECT id, name FROM tournaments ORDER BY id DESC")
-        if not rows: return
+        if not rows: 
+            await query.edit_message_text("❌ No tournaments to delete.")
+            return
         items = [(f"🗑️ {name}", f"admin_del_{tid}") for tid, name in rows]
         await query.edit_message_text("Select tournament to delete:", reply_markup=make_keyboard(items))
 
@@ -397,7 +422,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team_name = update.message.text.strip()
     tid = context.user_data.get('reg_tid')
-    if not tid: return ConversationHandler.END
+    if not tid: 
+        await update.message.reply_text("❌ Session expired.")
+        return ConversationHandler.END
     
     existing = await db_fetchone("SELECT id FROM teams WHERE tournament_id = ? AND name = ?", (tid, team_name))
     if existing:
@@ -449,16 +476,6 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =======================
 # UTILITY FUNCTIONS
 # =======================
-
-def admin_only(func):
-    @wraps(func)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user = update.effective_user
-        if user and user.id not in ADMINS:
-            await update.effective_message.reply_text("⛔ Admin-only command.")
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapper
 
 async def generate_bracket(tid: int):
     teams = await db_fetchall("SELECT id, name FROM teams WHERE tournament_id = ?", (tid,))
