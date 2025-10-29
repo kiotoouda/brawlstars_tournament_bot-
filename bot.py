@@ -32,7 +32,10 @@ DATABASE = "tournaments.db"
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 # -----------------------
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Conversation states
@@ -48,7 +51,7 @@ def admin_only(func):
         user = update.effective_user
         if user and user.id not in ADMINS:
             if update.callback_query:
-                await update.callback_query.answer("Admin only", show_alert=True)
+                await update.callback_query.answer("⛔ Admin only command", show_alert=True)
             else:
                 await update.effective_message.reply_text("⛔ Admin-only command.")
             return
@@ -68,9 +71,14 @@ gist_id = None
 def backup_database_sync():
     """Backup database to GitHub Gist"""
     if not GITHUB_TOKEN:
+        logger.info("🔒 GitHub token not set, skipping backup")
         return
     
     try:
+        if not os.path.exists(DATABASE):
+            logger.info("📊 Database file not found, skipping backup")
+            return
+            
         with open(DATABASE, 'rb') as f:
             db_data = base64.b64encode(f.read()).decode()
         
@@ -81,15 +89,22 @@ def backup_database_sync():
         if gist_id:
             url = f'https://api.github.com/gists/{gist_id}'
             data = {"files": {"bot_backup.json": {"content": json.dumps(backup_data)}}}
-            requests.patch(url, headers=headers, json=data)
+            response = requests.patch(url, headers=headers, json=data)
+            if response.status_code == 200:
+                logger.info("🔄 Database backup updated successfully")
+            else:
+                logger.warning(f"⚠️ Backup update failed: {response.status_code}")
         else:
             url = 'https://api.github.com/gists'
             data = {"public": False, "files": {"bot_backup.json": {"content": json.dumps(backup_data)}}}
             response = requests.post(url, headers=headers, json=data)
             if response.status_code == 201:
                 gist_id = response.json()['id']
-    except Exception:
-        pass
+                logger.info("💾 New backup created successfully")
+            else:
+                logger.warning(f"⚠️ Backup creation failed: {response.status_code}")
+    except Exception as e:
+        logger.error(f"❌ Backup error: {e}")
 
 async def backup_database():
     loop = asyncio.get_event_loop()
@@ -98,6 +113,7 @@ async def backup_database():
 def restore_from_backup_sync():
     """Restore database from GitHub Gist"""
     if not GITHUB_TOKEN:
+        logger.info("🔒 GitHub token not set, skipping restore")
         return
     
     try:
@@ -116,9 +132,11 @@ def restore_from_backup_sync():
                         db_data = base64.b64decode(backup_data['database'])
                         with open(DATABASE, 'wb') as f:
                             f.write(db_data)
+                        logger.info("🔄 Database restored from backup")
                         return
-    except Exception:
-        pass
+        logger.info("📭 No backup found to restore")
+    except Exception as e:
+        logger.error(f"❌ Restore error: {e}")
 
 async def restore_from_backup():
     loop = asyncio.get_event_loop()
@@ -129,70 +147,88 @@ async def restore_from_backup():
 # =======================
 
 async def init_db():
-    await restore_from_backup()
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.executescript("""
-        CREATE TABLE IF NOT EXISTS tournaments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            max_teams INTEGER NOT NULL,
-            status TEXT DEFAULT 'registration',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS teams (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tournament_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            leader_username TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS roster_files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            team_id INTEGER NOT NULL,
-            telegram_file_id TEXT
-        );
-        CREATE TABLE IF NOT EXISTS bracket_matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tournament_id INTEGER NOT NULL,
-            round_index INTEGER NOT NULL,
-            match_index INTEGER NOT NULL,
-            teamA_id INTEGER,
-            teamB_id INTEGER,
-            winner_team_id INTEGER
-        );
-        """)
-        await db.commit()
+    """Initialize database with proper error handling"""
+    try:
+        await restore_from_backup()
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.executescript("""
+            CREATE TABLE IF NOT EXISTS tournaments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                max_teams INTEGER NOT NULL,
+                status TEXT DEFAULT 'registration',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS teams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                leader_username TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id)
+            );
+            CREATE TABLE IF NOT EXISTS roster_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id INTEGER NOT NULL,
+                telegram_file_id TEXT,
+                FOREIGN KEY (team_id) REFERENCES teams (id)
+            );
+            CREATE TABLE IF NOT EXISTS bracket_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tournament_id INTEGER NOT NULL,
+                round_index INTEGER NOT NULL,
+                match_index INTEGER NOT NULL,
+                teamA_id INTEGER,
+                teamB_id INTEGER,
+                winner_team_id INTEGER,
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
+                FOREIGN KEY (teamA_id) REFERENCES teams (id),
+                FOREIGN KEY (teamB_id) REFERENCES teams (id),
+                FOREIGN KEY (winner_team_id) REFERENCES teams (id)
+            );
+            """)
+            await db.commit()
+        logger.info("📊 Database initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Database initialization error: {e}")
 
 async def db_execute(query: str, params: tuple = ()):
+    """Execute database query with backup"""
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute(query, params)
         await db.commit()
     await backup_database()
 
 async def db_fetchone(query: str, params: tuple = ()):
+    """Fetch single row from database"""
     async with aiosqlite.connect(DATABASE) as db:
         cur = await db.execute(query, params)
         return await cur.fetchone()
 
 async def db_fetchall(query: str, params: tuple = ()):
+    """Fetch all rows from database"""
     async with aiosqlite.connect(DATABASE) as db:
         cur = await db.execute(query, params)
         return await cur.fetchall()
 
 async def count_registered(tid: int) -> int:
+    """Count registered teams in tournament"""
     row = await db_fetchone("SELECT COUNT(*) FROM teams WHERE tournament_id = ?", (tid,))
     return row[0] if row else 0
 
 async def get_tournament_max_teams(tid: int) -> int:
+    """Get maximum teams for tournament"""
     row = await db_fetchone("SELECT max_teams FROM tournaments WHERE id = ?", (tid,))
     return row[0] if row else 0
 
 async def is_tournament_full(tid: int) -> bool:
+    """Check if tournament is full"""
     count = await count_registered(tid)
     max_teams = await get_tournament_max_teams(tid)
     return count >= max_teams
 
 async def get_team_name(team_id: int) -> str:
+    """Get team name by ID"""
     if not team_id:
         return "TBD"
     team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
@@ -203,15 +239,14 @@ async def get_team_name(team_id: int) -> str:
 # =======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message and main menu keyboard"""
     user = update.effective_user
     
-    # 🎉 ENHANCED GREETING MESSAGE
+    # 🎉 ENHANCED GREETING MESSAGE - FIXED HTML
     greeting = f"""
 ✨ <b>WELCOME TO BRAWL STARS TOURNAMENT BOT!</b> ✨
 
 🎮 <i>Hello {user.first_name}! Ready to dominate the tournament?</i> 🎮
-
-I'm your ultimate tournament assistant! Here's what I can do for you:
 
 <b>🏆 TOURNAMENT FEATURES:</b>
 • 📋 Browse active tournaments
@@ -221,10 +256,10 @@ I'm your ultimate tournament assistant! Here's what I can do for you:
 • 📊 Track your player statistics
 
 <b>🎯 QUICK COMMANDS:</b>
-/info <id> - Tournament details
+/info ID - Tournament details
 /myteams - Your registered teams  
 /stats - Your player statistics
-/search <name> - Find tournaments
+/search NAME - Find tournaments
 
 <b>🚀 READY TO PLAY?</b>
 Use the buttons below to get started! The arena awaits! ⚔️
@@ -249,6 +284,7 @@ Use the buttons below to get started! The arena awaits! ⚔️
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message"""
     text = """
 🤖 <b>BRAWL STARS TOURNAMENT BOT - COMPLETE GUIDE</b> 🤖
 
@@ -257,12 +293,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Use <b>"🔎 View Teams"</b> to see registered teams
 • <b>/myteams</b> - View your registered teams
 • <b>/stats</b> - View your player statistics  
-• <b>/info <id></b> - Get tournament details
-• <b>/search <name></b> - Search tournaments
+• <b>/info ID</b> - Get tournament details
+• <b>/search NAME</b> - Search tournaments
 
 <b>🛠️ FOR ADMINS:</b>
 • Use <b>"🛠️ Admin Panel"</b> for admin controls
-• <b>/create <name> <teams></b> - Create tournament
+• <b>/create NAME TEAMS</b> - Create tournament
 • Manage brackets and record match results
 
 <b>📞 NEED HELP?</b>
@@ -273,6 +309,7 @@ Contact the tournament organizers!
     await update.message.reply_text(text, parse_mode="HTML")
 
 async def show_tournaments_keyboard():
+    """Create tournaments keyboard"""
     rows = await db_fetchall("SELECT id, name, max_teams, status FROM tournaments ORDER BY id DESC")
     items = []
     for tid, name, max_teams, status in rows:
@@ -289,10 +326,12 @@ async def show_tournaments_keyboard():
     return make_keyboard(items) if items else make_keyboard([("No tournaments available", "none")])
 
 async def tournaments_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tournaments list"""
     kb = await show_tournaments_keyboard()
     await update.message.reply_text("🏆 Available tournaments:", reply_markup=kb)
 
 async def show_tournament_detail(tid: int, user_id: int):
+    """Show tournament details"""
     row = await db_fetchone("SELECT name, max_teams, status FROM tournaments WHERE id = ?", (tid,))
     if not row:
         return "❌ Tournament not found.", None
@@ -492,6 +531,7 @@ async def show_bracket_public(tid: int):
 # =======================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle callback queries"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -545,7 +585,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             media = [InputMediaPhoto(row[0]) for row in file_ids]
             try:
                 await query.message.reply_media_group(media)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error sending media: {e}")
                 await query.message.reply_text("📷 Roster photos available")
         else:
             await query.edit_message_text(text + "\n📷 No roster photos available", parse_mode="HTML")
@@ -564,6 +605,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await winner_callback_handler(update, context)
 
 async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle team name registration"""
     team_name = update.message.text.strip()
     tid = context.user_data.get('reg_tid')
     
@@ -587,6 +629,7 @@ async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return REG_LEADER_USERNAME
 
 async def reg_leader(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle leader username registration"""
     leader = update.message.text.strip().lstrip('@')
     if not leader:
         await update.message.reply_text("❌ Please enter a valid username:")
@@ -598,6 +641,7 @@ async def reg_leader(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return REG_WAIT_ROSTER
 
 async def reg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle roster photo upload"""
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
         context.user_data.setdefault('reg_roster', []).append(file_id)
@@ -606,6 +650,7 @@ async def reg_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return REG_WAIT_ROSTER
 
 async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Complete registration process"""
     tid = context.user_data.get('reg_tid')
     team_name = context.user_data.get('reg_teamname')
     leader = context.user_data.get('reg_leader')
@@ -653,8 +698,8 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     admin_id, 
                     f"🎉 Tournament {tid} is now FULL! ({count}/{max_teams})\nUse admin panel to generate bracket."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error notifying admin: {e}")
     
     # Notify admins about new registration
     for admin_id in ADMINS:
@@ -663,8 +708,8 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 admin_id, 
                 f"📢 New registration:\nTeam: {team_name}\nLeader: @{leader}\nTournament: {tid}\nTotal: {count}/{max_teams}"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error notifying admin: {e}")
     
     await update.message.reply_text(f"✅ Team '{team_name}' registered successfully! 🎉\n\nTotal teams: {count}/{max_teams}\n\nUse /myteams to see all your teams!")
     context.user_data.clear()
@@ -676,6 +721,7 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel"""
     kb = [
         [InlineKeyboardButton("🏆 Create Tournament", callback_data="admin_create")],
         [InlineKeyboardButton("📋 Manage Tournaments", callback_data="admin_list")],
@@ -685,6 +731,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create tournament command"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text("Usage: /create <tournament_name> <max_teams>\nExample: /create Summer Cup 8")
         return
@@ -717,6 +764,7 @@ async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Error creating tournament.")
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin callbacks"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -867,6 +915,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 # =======================
 
 async def winner_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle winner selection callbacks"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -991,12 +1040,13 @@ async def declare_winner(tid: int, winner_team_id: int):
         # Notify admins
         for admin_id in ADMINS:
             try:
-                await context.bot.send_message(
+                from telegram.ext import ContextTypes
+                await ContextTypes.bot.send_message(
                     admin_id,
                     f"🏆 TOURNAMENT FINISHED!\nWinner: {winner_team[0]}\n\nYou can now delete the tournament and create a new one."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error notifying admin: {e}")
 
 async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_TYPE, tid: int):
     """Show bracket with buttons for admins to record winners"""
@@ -1051,10 +1101,11 @@ async def show_bracket_admin_view(update: Update, context: ContextTypes.DEFAULT_
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb) if kb else None)
 
 # =======================
-# TEXT MESSAGE HANDLER - FIXED
+# TEXT MESSAGE HANDLER
 # =======================
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages"""
     text = update.message.text.strip()
     user = update.effective_user
     
@@ -1085,13 +1136,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # =======================
+# ERROR HANDLER
+# =======================
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors in the bot."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    # Try to notify user about the error
+    try:
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ An error occurred. Please try again or contact support."
+            )
+    except Exception:
+        pass
+
+# =======================
 # MAIN FUNCTION
 # =======================
 
 async def auto_backup():
     """Auto-backup every hour"""
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(3600)  # 1 hour
         await backup_database()
         logger.info("🔄 Auto-backup completed")
 
@@ -1117,12 +1185,15 @@ def main():
     # Build application
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
+    # Add error handler
+    app.add_error_handler(error_handler)
+    
     # Add handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("create", create_tournament_simple))
     app.add_handler(CommandHandler("admin_list", admin_panel))
-    app.add_handler(CommandHandler("info", tournament_info))
+    app.add_handler(CommandHandler("info", tournament_info))s
     app.add_handler(CommandHandler("myteams", my_teams))
     app.add_handler(CommandHandler("stats", player_stats))
     app.add_handler(CommandHandler("search", search_tournament))
@@ -1143,7 +1214,7 @@ def main():
     )
     app.add_handler(reg_conv)
     
-    # Callback queries - IMPORTANT: Add winner handler separately
+    # Callback queries
     app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(view_t_|reg_|teams_|team_|admin_|bracket_)"))
     app.add_handler(CallbackQueryHandler(winner_callback_handler, pattern=r"^win_"))
     
