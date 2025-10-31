@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - COMPATIBLE DEPLOYMENT VERSION
+Brawl Stars Tournament Bot - MODERN DEPLOYMENT READY VERSION
 """
 
 import os
