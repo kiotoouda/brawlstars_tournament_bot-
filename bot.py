@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - PERFECTED VERSION
+Brawl Stars Tournament Bot - PERFECTED VERSION WITH FIXED DELETION
 """
 
 import os
@@ -165,13 +165,13 @@ async def init_db():
                 name TEXT NOT NULL,
                 leader_username TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (tournament_id) REFERENCES tournaments (id)
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS roster_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_id INTEGER NOT NULL,
                 telegram_file_id TEXT,
-                FOREIGN KEY (team_id) REFERENCES teams (id)
+                FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS bracket_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,10 +181,10 @@ async def init_db():
                 teamA_id INTEGER,
                 teamB_id INTEGER,
                 winner_team_id INTEGER,
-                FOREIGN KEY (tournament_id) REFERENCES tournaments (id),
-                FOREIGN KEY (teamA_id) REFERENCES teams (id),
-                FOREIGN KEY (teamB_id) REFERENCES teams (id),
-                FOREIGN KEY (winner_team_id) REFERENCES teams (id)
+                FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE,
+                FOREIGN KEY (teamA_id) REFERENCES teams (id) ON DELETE CASCADE,
+                FOREIGN KEY (teamB_id) REFERENCES teams (id) ON DELETE CASCADE,
+                FOREIGN KEY (winner_team_id) REFERENCES teams (id) ON DELETE CASCADE
             );
             """)
             await db.commit()
@@ -233,6 +233,59 @@ async def get_team_name(team_id: int) -> str:
         return "TBD"
     team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
     return team[0] if team else "Unknown"
+
+# =======================
+# DELETION FUNCTIONS - FIXED
+# =======================
+
+async def delete_tournament_complete(tid: int) -> bool:
+    """Completely delete tournament and all related data"""
+    try:
+        async with aiosqlite.connect(DATABASE) as db:
+            # Enable foreign keys
+            await db.execute("PRAGMA foreign_keys = ON")
+            
+            # Delete tournament (cascades to teams, roster_files, bracket_matches)
+            await db.execute("DELETE FROM tournaments WHERE id = ?", (tid,))
+            await db.commit()
+            
+        await backup_database()
+        logger.info(f"✅ Tournament {tid} deleted successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error deleting tournament {tid}: {e}")
+        return False
+
+async def delete_team_complete(team_id: int) -> bool:
+    """Completely delete team and all related data"""
+    try:
+        async with aiosqlite.connect(DATABASE) as db:
+            # Enable foreign keys
+            await db.execute("PRAGMA foreign_keys = ON")
+            
+            # Get tournament ID before deletion for status update
+            tournament_row = await db_fetchone("SELECT tournament_id FROM teams WHERE id = ?", (team_id,))
+            
+            # Delete team (cascades to roster_files)
+            await db.execute("DELETE FROM teams WHERE id = ?", (team_id,))
+            
+            # Update tournament status if needed
+            if tournament_row:
+                tid = tournament_row[0]
+                count = await count_registered(tid)
+                max_teams = await get_tournament_max_teams(tid)
+                
+                if count < max_teams:
+                    await db.execute("UPDATE tournaments SET status = 'registration' WHERE id = ?", (tid,))
+            
+            await db.commit()
+            
+        await backup_database()
+        logger.info(f"✅ Team {team_id} deleted successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error deleting team {team_id}: {e}")
+        return False
 
 # =======================
 # BOT HANDLERS - USER
@@ -716,7 +769,7 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =======================
-# ADMIN FEATURES
+# ADMIN FEATURES - WITH FIXED DELETION
 # =======================
 
 @admin_only
@@ -725,7 +778,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("🏆 Create Tournament", callback_data="admin_create")],
         [InlineKeyboardButton("📋 Manage Tournaments", callback_data="admin_list")],
-        [InlineKeyboardButton("📊 View All Teams", callback_data="admin_all_teams")]
+        [InlineKeyboardButton("📊 View All Teams", callback_data="admin_all_teams")],
+        [InlineKeyboardButton("🗑️ Delete Tournament", callback_data="admin_delete_tournament")],
+        [InlineKeyboardButton("👥 Delete Team", callback_data="admin_delete_team")]
     ]
     await update.message.reply_text("🛠️ Admin Panel", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -764,7 +819,7 @@ async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Error creating tournament.")
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin callbacks"""
+    """Handle admin callbacks with FIXED deletion"""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -844,13 +899,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
         if team:
-            await db_execute("DELETE FROM teams WHERE id = ?", (team_id,))
-            # Update tournament status back to registration if it was full
-            count = await count_registered(tid)
-            max_teams = await get_tournament_max_teams(tid)
-            if count < max_teams:
-                await db_execute("UPDATE tournaments SET status = 'registration' WHERE id = ?", (tid,))
-            await query.edit_message_text(f"✅ Removed team: {team[0]}")
+            success = await delete_team_complete(team_id)
+            if success:
+                await query.edit_message_text(f"✅ Removed team: {team[0]}")
+            else:
+                await query.edit_message_text(f"❌ Failed to remove team: {team[0]}")
         else:
             await query.edit_message_text("❌ Team not found.")
 
@@ -886,8 +939,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         tid = int(data.split("_")[-1])
         tournament = await db_fetchone("SELECT name FROM tournaments WHERE id = ?", (tid,))
         if tournament:
-            await db_execute("DELETE FROM tournaments WHERE id = ?", (tid,))
-            await query.edit_message_text(f"✅ Deleted tournament: {tournament[0]}")
+            success = await delete_tournament_complete(tid)
+            if success:
+                await query.edit_message_text(f"✅ Deleted tournament: {tournament[0]}")
+            else:
+                await query.edit_message_text(f"❌ Failed to delete tournament: {tournament[0]}")
 
     elif data == "admin_all_teams":
         teams = await db_fetchall("""
@@ -909,6 +965,33 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             text += f"• {team_name} - @{leader or 'No username'}\n"
             
         await query.edit_message_text(text)
+
+    # NEW: Direct deletion options
+    elif data == "admin_delete_tournament":
+        rows = await db_fetchall("SELECT id, name FROM tournaments ORDER BY id DESC")
+        if not rows:
+            await query.edit_message_text("❌ No tournaments to delete.")
+            return
+        
+        items = [(f"🗑️ {name}", f"admin_del_{tid}") for tid, name in rows]
+        await query.edit_message_text("Select tournament to delete:", reply_markup=make_keyboard(items))
+
+    elif data == "admin_delete_team":
+        teams = await db_fetchall("""
+            SELECT t.id, t.name, tour.name 
+            FROM teams t 
+            JOIN tournaments tour ON t.tournament_id = tour.id 
+            ORDER BY tour.id, t.id
+        """)
+        if not teams:
+            await query.edit_message_text("❌ No teams to delete.")
+            return
+        
+        items = []
+        for team_id, team_name, tournament_name in teams:
+            items.append((f"🗑️ {team_name} ({tournament_name})", f"remove_0_{team_id}"))
+        
+        await query.edit_message_text("Select team to delete:", reply_markup=make_keyboard(items))
 
 # =======================
 # WINNER SELECTION HANDLER
@@ -1040,8 +1123,7 @@ async def declare_winner(tid: int, winner_team_id: int):
         # Notify admins
         for admin_id in ADMINS:
             try:
-                from telegram.ext import ContextTypes
-                await ContextTypes.bot.send_message(
+                await context.bot.send_message(
                     admin_id,
                     f"🏆 TOURNAMENT FINISHED!\nWinner: {winner_team[0]}\n\nYou can now delete the tournament and create a new one."
                 )
@@ -1221,7 +1303,7 @@ def main():
     # Text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    logger.info("🤖 Bot is running with ALL features and FIXED keyboard...")
+    logger.info("🤖 Bot is running with ALL features and FIXED DELETION...")
     app.run_polling()
 
 if __name__ == "__main__":
