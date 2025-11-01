@@ -19,7 +19,7 @@ from telegram import (
     KeyboardButton, ReplyKeyboardMarkup
 )
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters,
+    Application, CommandHandler, MessageHandler, ContextTypes, filters,
     CallbackQueryHandler, ConversationHandler
 )
 
@@ -617,60 +617,6 @@ async def show_tournaments_for_teams(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text("Select tournament to view teams:", reply_markup=make_keyboard(items))
 
 # =======================
-# MAIN FUNCTION
-# =======================
-
-def main():
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN environment variable is required!")
-        return
-    
-    logger.info("🚀 Starting Brawl Stars Tournament Bot with WORKING DELETION...")
-    
-    # Initialize database
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    loop.run_until_complete(init_db())
-    
-    # Build application
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("create", create_tournament_simple))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    
-    # Registration conversation
-    reg_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(callback_handler, pattern=r"^reg_")],
-        states={
-            REG_TEAM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_team_name)],
-            REG_LEADER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_leader)],
-            REG_WAIT_ROSTER: [
-                MessageHandler(filters.PHOTO, reg_photo),
-                CommandHandler("done", reg_done),
-            ],
-        },
-        fallbacks=[CommandHandler("done", reg_done)],
-        per_message=False
-    )
-    app.add_handler(reg_conv)
-    
-    # Callback queries - SIMPLIFIED PATTERNS
-    app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(admin|view_t_|teams_|reg_|delete_|confirm_|manage_|generate_)"))
-    
-    # Text messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    logger.info("🤖 Bot is running with WORKING DELETION SYSTEM!")
-    app.run_polling()
-
-# =======================
 # REGISTRATION FLOW (simplified)
 # =======================
 
@@ -741,5 +687,56 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
+# =======================
+# MAIN FUNCTION - UPDATED
+# =======================
+
+async def main():
+    """Main function with modern application setup"""
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN environment variable is required!")
+        return
+    
+    logger.info("🚀 Starting Brawl Stars Tournament Bot with WORKING DELETION...")
+    
+    # Initialize database
+    await init_db()
+    
+    # Build application with modern approach
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("create", create_tournament_simple))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    
+    # Registration conversation
+    reg_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(callback_handler, pattern=r"^reg_")],
+        states={
+            REG_TEAM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_team_name)],
+            REG_LEADER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_leader)],
+            REG_WAIT_ROSTER: [
+                MessageHandler(filters.PHOTO, reg_photo),
+                CommandHandler("done", reg_done),
+            ],
+        },
+        fallbacks=[CommandHandler("done", reg_done)],
+        per_message=False
+    )
+    application.add_handler(reg_conv)
+    
+    # Callback queries - SIMPLIFIED PATTERNS
+    application.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(admin|view_t_|teams_|reg_|delete_|confirm_|manage_|generate_)"))
+    
+    # Text messages
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    logger.info("🤖 Bot is running with WORKING DELETION SYSTEM!")
+    
+    # Start the bot
+    await application.run_polling()
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
