@@ -1,5 +1,5 @@
 """
-Brawl Stars Tournament Bot - WORKING VERSION
+Brawl Stars Tournament Bot - WORKING DELETION VERSION
 """
 
 import os
@@ -7,7 +7,11 @@ import asyncio
 import random
 import logging
 import aiosqlite
-from typing import List, Tuple, Dict, Any
+import requests
+import json
+import base64
+from pathlib import Path
+from typing import Optional, List, Tuple, Dict, Any
 from functools import wraps
 
 from telegram import (
@@ -25,6 +29,7 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = {7665378359, 6548564636}
 DATABASE = "tournaments.db"
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 # -----------------------
 
 logging.basicConfig(
@@ -58,13 +63,15 @@ def make_keyboard(items: List[Tuple[str, str]]):
     return InlineKeyboardMarkup(kb)
 
 # =======================
-# DATABASE FUNCTIONS
+# DATABASE FUNCTIONS - SIMPLIFIED
 # =======================
 
 async def init_db():
     """Initialize database"""
     try:
         async with aiosqlite.connect(DATABASE) as db:
+            await db.execute("PRAGMA foreign_keys = ON")
+            
             await db.executescript("""
             CREATE TABLE IF NOT EXISTS tournaments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +80,7 @@ async def init_db():
                 status TEXT DEFAULT 'registration',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            
             CREATE TABLE IF NOT EXISTS teams (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tournament_id INTEGER NOT NULL,
@@ -81,12 +89,14 @@ async def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE
             );
+            
             CREATE TABLE IF NOT EXISTS roster_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 team_id INTEGER NOT NULL,
                 telegram_file_id TEXT,
                 FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE CASCADE
             );
+            
             CREATE TABLE IF NOT EXISTS bracket_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tournament_id INTEGER NOT NULL,
@@ -130,39 +140,24 @@ async def count_registered(tid: int) -> int:
     row = await db_fetchone("SELECT COUNT(*) FROM teams WHERE tournament_id = ?", (tid,))
     return row[0] if row else 0
 
-async def get_tournament_max_teams(tid: int) -> int:
-    """Get maximum teams for tournament"""
-    row = await db_fetchone("SELECT max_teams FROM tournaments WHERE id = ?", (tid,))
-    return row[0] if row else 0
-
-async def is_tournament_full(tid: int) -> bool:
-    """Check if tournament is full"""
-    count = await count_registered(tid)
-    max_teams = await get_tournament_max_teams(tid)
-    return count >= max_teams
-
-async def get_team_name(team_id: int) -> str:
-    """Get team name by ID"""
-    if not team_id:
-        return "TBD"
-    team = await db_fetchone("SELECT name FROM teams WHERE id = ?", (team_id,))
-    return team[0] if team else "Unknown"
-
 # =======================
-# DELETION FUNCTIONS - WORKING
+# DELETION FUNCTIONS - SIMPLE & RELIABLE
 # =======================
 
 async def delete_tournament(tournament_id: int) -> Tuple[bool, str]:
-    """Delete tournament and all related data"""
+    """Delete tournament and all related data - SIMPLE VERSION"""
     try:
+        # Get tournament name for confirmation message
         tournament = await db_fetchone("SELECT name FROM tournaments WHERE id = ?", (tournament_id,))
         if not tournament:
             return False, "Tournament not found"
         
         tournament_name = tournament[0]
+        
+        # Delete tournament (cascades to teams, roster_files, bracket_matches)
         await db_execute("DELETE FROM tournaments WHERE id = ?", (tournament_id,))
         
-        logger.info(f"✅ Tournament '{tournament_name}' deleted successfully")
+        logger.info(f"✅ Tournament '{tournament_name}' (ID: {tournament_id}) deleted successfully")
         return True, tournament_name
         
     except Exception as e:
@@ -170,8 +165,9 @@ async def delete_tournament(tournament_id: int) -> Tuple[bool, str]:
         return False, str(e)
 
 async def delete_team(team_id: int) -> Tuple[bool, str]:
-    """Delete team and all related data"""
+    """Delete team and all related data - SIMPLE VERSION"""
     try:
+        # Get team info for confirmation message
         team_info = await db_fetchone("""
             SELECT t.name, t.tournament_id, tour.name 
             FROM teams t 
@@ -183,7 +179,15 @@ async def delete_team(team_id: int) -> Tuple[bool, str]:
             return False, "Team not found"
             
         team_name, tournament_id, tournament_name = team_info
+        
+        # Delete team (cascades to roster_files)
         await db_execute("DELETE FROM teams WHERE id = ?", (team_id,))
+        
+        # Update tournament status if needed
+        count = await count_registered(tournament_id)
+        max_teams_row = await db_fetchone("SELECT max_teams FROM tournaments WHERE id = ?", (tournament_id,))
+        if max_teams_row and count < max_teams_row[0]:
+            await db_execute("UPDATE tournaments SET status = 'registration' WHERE id = ?", (tournament_id,))
         
         logger.info(f"✅ Team '{team_name}' deleted from tournament '{tournament_name}'")
         return True, f"{team_name} from {tournament_name}"
@@ -193,7 +197,7 @@ async def delete_team(team_id: int) -> Tuple[bool, str]:
         return False, str(e)
 
 # =======================
-# BOT HANDLERS
+# BOT HANDLERS - SIMPLIFIED
 # =======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,60 +240,20 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(text, parse_mode="HTML")
 
-async def show_tournaments_keyboard():
-    """Create tournaments keyboard"""
-    rows = await db_fetchall("SELECT id, name, max_teams, status FROM tournaments ORDER BY id DESC")
-    items = []
-    for tid, name, max_teams, status in rows:
-        count = await count_registered(tid)
-        status_emoji = "⚔️" if status == 'in_progress' else "✅" if status == 'finished' else "📝"
-        label = f"{name} ({count}/{max_teams}) {status_emoji}"
-        items.append((label, f"view_t_{tid}"))
-    return make_keyboard(items) if items else make_keyboard([("No tournaments available", "none")])
-
-async def tournaments_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show tournaments list"""
-    kb = await show_tournaments_keyboard()
-    await update.message.reply_text("🏆 Available tournaments:", reply_markup=kb)
-
-async def show_tournament_detail(tid: int, user_id: int):
-    """Show tournament details"""
-    row = await db_fetchone("SELECT name, max_teams, status FROM tournaments WHERE id = ?", (tid,))
-    if not row:
-        return "❌ Tournament not found.", None
-    
-    name, max_teams, status = row
-    count = await count_registered(tid)
-    
-    text = f"""🏆 <b>{name}</b>
-📊 ID: {tid}
-👥 Teams: {count}/{max_teams}
-🎯 Status: {status}"""
-
-    kb = []
-    if status == 'registration' and count < max_teams:
-        kb.append([InlineKeyboardButton("✅ Register Team", callback_data=f"reg_{tid}")])
-    kb.append([InlineKeyboardButton("👀 View Teams", callback_data=f"teams_{tid}")])
-    
-    if user_id in ADMINS:
-        kb.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data=f"admin_{tid}")])
-    
-    return text, InlineKeyboardMarkup(kb)
-
 # =======================
-# ADMIN FEATURES
+# ADMIN FEATURES - WORKING DELETION
 # =======================
 
 @admin_only
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin panel"""
+    """Show admin panel with working deletion"""
     kb = [
         [InlineKeyboardButton("🏆 Create Tournament", callback_data="admin_create")],
         [InlineKeyboardButton("📋 Manage Tournaments", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ Delete Tournament", callback_data="admin_delete_tournament")],
         [InlineKeyboardButton("👥 Delete Team", callback_data="admin_delete_team")]
     ]
-    await update.message.reply_text("🛠️ Admin Panel", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🛠️ Admin Panel - Choose an option:", reply_markup=InlineKeyboardMarkup(kb))
 
 @admin_only
 async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -323,14 +287,16 @@ async def create_tournament_simple(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Error creating tournament.")
 
 # =======================
-# DELETION CALLBACK HANDLERS
+# DELETION CALLBACK HANDLERS - WORKING VERSION
 # =======================
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle admin callbacks"""
+    """Handle admin callbacks - SIMPLIFIED"""
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    logger.info(f"Admin callback received: {data}")
 
     if data == "admin_create":
         await query.message.reply_text("🏆 To create tournament, use:\n\n<code>/create Tournament Name 8</code>\n\nReplace with your tournament name and max teams.", parse_mode="HTML")
@@ -356,6 +322,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         team_id = int(data.split("_")[2])
         await execute_team_deletion(update, context, team_id)
 
+    elif data.startswith("manage_tournament_"):
+        tournament_id = int(data.split("_")[2])
+        await show_tournament_management(update, context, tournament_id)
+
 async def show_tournaments_for_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show tournaments for management"""
     query = update.callback_query
@@ -372,6 +342,8 @@ async def show_tournaments_for_management(update: Update, context: ContextTypes.
         items.append((f"{name} ({count}/{max_teams}) {status_emoji}", f"manage_tournament_{tid}"))
     
     kb = make_keyboard(items)
+    kb.inline_keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    
     await query.edit_message_text("🏆 Select tournament to manage:", reply_markup=kb)
 
 async def show_tournaments_for_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -388,6 +360,8 @@ async def show_tournaments_for_deletion(update: Update, context: ContextTypes.DE
         items.append((f"🗑️ {name}", f"delete_tournament_{tid}"))
     
     kb = make_keyboard(items)
+    kb.inline_keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    
     await query.edit_message_text("🗑️ Select tournament to DELETE:", reply_markup=kb)
 
 async def show_teams_for_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -409,7 +383,34 @@ async def show_teams_for_deletion(update: Update, context: ContextTypes.DEFAULT_
         items.append((f"🗑️ {team_name} ({tournament_name})", f"delete_team_{team_id}"))
     
     kb = make_keyboard(items)
+    kb.inline_keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    
     await query.edit_message_text("👥 Select team to DELETE:", reply_markup=kb)
+
+async def show_tournament_management(update: Update, context: ContextTypes.DEFAULT_TYPE, tournament_id: int):
+    """Show tournament management options"""
+    query = update.callback_query
+    row = await db_fetchone("SELECT name, status FROM tournaments WHERE id = ?", (tournament_id,))
+    
+    if not row:
+        await query.edit_message_text("❌ Tournament not found.")
+        return
+        
+    name, status = row
+    count = await count_registered(tournament_id)
+    
+    kb = [
+        [InlineKeyboardButton("📋 View Teams", callback_data=f"view_teams_{tournament_id}")],
+        [InlineKeyboardButton("🗑️ Delete Tournament", callback_data=f"delete_tournament_{tournament_id}")],
+    ]
+    
+    if count >= 2 and status in ['registration', 'full']:
+        kb.append([InlineKeyboardButton("⚔️ Generate Bracket", callback_data=f"generate_bracket_{tournament_id}")])
+    
+    kb.append([InlineKeyboardButton("🔙 Back", callback_data="admin_list")])
+    
+    text = f"🛠️ Managing: {name}\nStatus: {status}\nTeams: {count}"
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
 async def confirm_tournament_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE, tournament_id: int):
     """Show confirmation for tournament deletion"""
@@ -484,13 +485,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    logger.info(f"Callback received: {data}")
+
     # Handle admin callbacks
     if data.startswith("admin"):
         await admin_callback_handler(update, context)
     
-    # Handle deletion callbacks
-    elif data.startswith("delete_tournament_") or data.startswith("confirm_delete_tournament_") or data.startswith("delete_team_"):
-        await admin_callback_handler(update, context)
+    # Handle back button
+    elif data == "admin_back":
+        await admin_panel_callback(update, context)
     
     # Handle other callbacks
     elif data.startswith("view_t_"):
@@ -499,6 +502,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await registration_callback(update, context)
     else:
         await query.edit_message_text("❌ Unknown command. Please try again.")
+
+async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show admin panel via callback"""
+    query = update.callback_query
+    kb = [
+        [InlineKeyboardButton("🏆 Create Tournament", callback_data="admin_create")],
+        [InlineKeyboardButton("📋 Manage Tournaments", callback_data="admin_list")],
+        [InlineKeyboardButton("🗑️ Delete Tournament", callback_data="admin_delete_tournament")],
+        [InlineKeyboardButton("👥 Delete Team", callback_data="admin_delete_team")]
+    ]
+    await query.edit_message_text("🛠️ Admin Panel - Choose an option:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def view_tournament_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle tournament view callback"""
@@ -525,7 +539,7 @@ async def view_tournament_callback(update: Update, context: ContextTypes.DEFAULT
     kb.append([InlineKeyboardButton("👀 View Teams", callback_data=f"teams_{tournament_id}")])
     
     if query.from_user.id in ADMINS:
-        kb.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data=f"admin_{tournament_id}")])
+        kb.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data=f"admin_manage_{tournament_id}")])
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
 
@@ -603,7 +617,61 @@ async def show_tournaments_for_teams(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text("Select tournament to view teams:", reply_markup=make_keyboard(items))
 
 # =======================
-# REGISTRATION FLOW
+# MAIN FUNCTION
+# =======================
+
+def main():
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN environment variable is required!")
+        return
+    
+    logger.info("🚀 Starting Brawl Stars Tournament Bot with WORKING DELETION...")
+    
+    # Initialize database
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    loop.run_until_complete(init_db())
+    
+    # Build application
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("create", create_tournament_simple))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    
+    # Registration conversation
+    reg_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(callback_handler, pattern=r"^reg_")],
+        states={
+            REG_TEAM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_team_name)],
+            REG_LEADER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_leader)],
+            REG_WAIT_ROSTER: [
+                MessageHandler(filters.PHOTO, reg_photo),
+                CommandHandler("done", reg_done),
+            ],
+        },
+        fallbacks=[CommandHandler("done", reg_done)],
+        per_message=False
+    )
+    app.add_handler(reg_conv)
+    
+    # Callback queries - SIMPLIFIED PATTERNS
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(admin|view_t_|teams_|reg_|delete_|confirm_|manage_|generate_)"))
+    
+    # Text messages
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    logger.info("🤖 Bot is running with WORKING DELETION SYSTEM!")
+    app.run_polling()
+
+# =======================
+# REGISTRATION FLOW (simplified)
 # =======================
 
 async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -614,15 +682,6 @@ async def reg_team_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not tid:
         await update.message.reply_text("❌ Session expired. Please start over.")
         return ConversationHandler.END
-    
-    if await is_tournament_full(tid):
-        await update.message.reply_text("❌ Tournament is now full! Registration closed.")
-        return ConversationHandler.END
-    
-    existing = await db_fetchone("SELECT id FROM teams WHERE tournament_id = ? AND name = ?", (tid, team_name))
-    if existing:
-        await update.message.reply_text("❌ Team name already taken in this tournament. Choose another:")
-        return REG_TEAM_NAME
     
     context.user_data['reg_teamname'] = team_name
     await update.message.reply_text("👑 Enter team leader's Telegram username (without @):")
@@ -682,54 +741,5 @@ async def reg_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# =======================
-# MAIN FUNCTION
-# =======================
-
-async def main():
-    """Main function to run the bot"""
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN environment variable is required!")
-        return
-    
-    logger.info("🚀 Starting Brawl Stars Tournament Bot...")
-    
-    # Initialize database
-    await init_db()
-    
-    # Build application
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("create", create_tournament_simple))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    
-    # Registration conversation
-    reg_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(callback_handler, pattern=r"^reg_")],
-        states={
-            REG_TEAM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_team_name)],
-            REG_LEADER_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_leader)],
-            REG_WAIT_ROSTER: [
-                MessageHandler(filters.PHOTO, reg_photo),
-                CommandHandler("done", reg_done),
-            ],
-        },
-        fallbacks=[CommandHandler("done", reg_done)],
-        per_message=False
-    )
-    app.add_handler(reg_conv)
-    
-    # Callback queries
-    app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^(view_t_|reg_|teams_|team_|admin_|delete_|confirm_)"))
-    
-    # Text messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    logger.info("🤖 Bot is running with WORKING DELETION!")
-    await app.run_polling()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
